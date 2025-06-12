@@ -278,11 +278,9 @@
                 // Process projects
                 if (projects.projects && projects.projects.data) {
                     projects.projects.data.forEach(item => {
-                        const project = item.project;
-                        const project_revision = item.project_revision;
-                        const block = this.createBlockFromProject(project, project_revision, blockId++);
+                        const block = this.createBlockFromProject(item, blockId++);
                         this.metadataQueue.push(block);
-                        this.addMetadataItem(`📁 Project: ${project.title || 'Untitled'}`, 'project');
+                        this.addMetadataItem(`📁 Project: ${item.project.title || 'Untitled'}`, 'project');
                     });
                 }
 
@@ -320,7 +318,11 @@
                 document.getElementById('dataPoints').textContent = this.dataPoints;
             }
 
-            createBlockFromProject(project, project_revision, id) {
+            createBlockFromProject(item, id) {
+                const project = item.project;
+                const project_revision = item.p_revision;
+                const site = item.site;
+
                 const colors = ['#ff6b6b', '#4ecdc4', '#45b7d1', '#96ceb4', '#ffeaa7'];
                 const block = {
                     id: id,
@@ -338,10 +340,18 @@
                 };
 
                 const thumbnailUrl = project_revision?.current_screenshot_url;
+                const siteId = site?.id;
 
+                let imageUrlForGeneration = null;
                 if (thumbnailUrl) {
+                    imageUrlForGeneration = thumbnailUrl;
+                } else if (siteId) {
+                    imageUrlForGeneration = `https://images.websim.com/v1/site/${siteId}/600`;
+                }
+
+                if (imageUrlForGeneration) {
                     block.texture = { type: 'image', value: null, state: 'generating' };
-                    this.textureGenerationQueue.push({ block, thumbnailUrl });
+                    this.textureGenerationQueue.push({ block, thumbnailUrl: imageUrlForGeneration });
                 } else {
                     block.texture = { type: 'pattern', value: this.generateTexturePattern(project.title || 'untitled') };
                 }
@@ -356,43 +366,61 @@
 
                 const { block, thumbnailUrl } = this.textureGenerationQueue.shift();
 
-                await this.generateAITexture(block, thumbnailUrl);
+                await this.generateAITextureWithRetry(block, thumbnailUrl);
 
                 if (this.textureGenerationQueue.length > 0) {
-                    // A small delay between requests to not flood the server.
-                    setTimeout(() => this.processTextureGenerationQueue(), 500);
+                    // Increased delay between requests to not flood the server.
+                    setTimeout(() => this.processTextureGenerationQueue(), 1000);
                 }
             }
 
-            async generateAITexture(block, thumbnailUrl) {
-                try {
-                    const analysisCompletion = await websim.chat.completions.create({
-                        messages: [{
-                            role: "user",
-                            content: [
-                                { type: "text", text: "Describe this image for an image generation prompt. Focus on the main subject, style, and colors. Be concise, like 'a cute pixel art cat, blue and purple'." },
-                                { type: "image_url", image_url: { url: thumbnailUrl } },
-                            ],
-                        }],
-                    });
-                    const description = analysisCompletion.content;
+            async generateAITextureWithRetry(block, thumbnailUrl, maxRetries = 2) {
+                for (let i = 0; i < maxRetries; i++) {
+                    try {
+                        const analysisCompletion = await websim.chat.completions.create({
+                            messages: [{
+                                role: "user",
+                                content: [
+                                    { type: "text", text: "Describe this image for an image generation prompt. Focus on the main subject, style, and colors. Be concise, like 'a cute pixel art cat, blue and purple'." },
+                                    { type: "image_url", image_url: { url: thumbnailUrl } },
+                                ],
+                            }],
+                        });
+                        const description = analysisCompletion.content;
 
-                    const imageGenResult = await websim.imageGen({
-                        prompt: `a seamless, tileable, repeating texture based on: ${description}`,
-                        width: 128,
-                        height: 128,
-                    });
+                        if (!description) {
+                            throw new Error("AI analysis returned empty description.");
+                        }
 
-                    block.texture.value = imageGenResult.url;
-                    block.texture.state = 'ready';
-                    this.preloadTextureImage(imageGenResult.url);
+                        const imageGenResult = await websim.imageGen({
+                            prompt: `a seamless, tileable, repeating texture based on: ${description}`,
+                            width: 128,
+                            height: 128,
+                        });
 
-                } catch (error) {
-                    console.error('AI Texture generation failed for block', block.id, error);
-                    block.texture.state = 'failed';
-                    block.texture.type = 'pattern';
-                    block.texture.value = 'crosses';
+                        if (!imageGenResult || !imageGenResult.url) {
+                            throw new Error("AI image generation returned no URL.");
+                        }
+
+                        block.texture.value = imageGenResult.url;
+                        block.texture.state = 'ready';
+                        this.preloadTextureImage(imageGenResult.url);
+                        return; // Success, exit function
+                    } catch (error) {
+                        console.error(`AI Texture generation attempt ${i + 1}/${maxRetries} failed for block ${block.id}`, error);
+                        if (i < maxRetries - 1) {
+                            const delay = 2000 * (i + 1); // exponential backoff-ish
+                            console.log(`Retrying in ${delay / 1000}s...`);
+                            await new Promise(resolve => setTimeout(resolve, delay));
+                        }
+                    }
                 }
+
+                // All retries failed
+                console.error('All retries failed for block', block.id);
+                block.texture.state = 'failed';
+                block.texture.type = 'pattern';
+                block.texture.value = 'crosses';
             }
 
             preloadTextureImage(url) {
