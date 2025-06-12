@@ -192,6 +192,7 @@
                 this.blocksGenerated = 0;
                 this.dataPoints = 0;
                 this.gameRunning = false;
+                this.textureGenerationQueue = [];
                 
                 this.blockTypes = [];
                 this.userStats = {};
@@ -251,6 +252,8 @@
                     
                     // Process all data into blocks
                     this.processMetadataIntoBlocks(projectsData, followersData, followingData, likesData);
+                    
+                    this.processTextureGenerationQueue();
                     
                     fetchStatus.textContent = `✅ Mining complete! ${this.metadataQueue.length} blocks ready`;
                     progressBar.style.width = '100%';
@@ -338,12 +341,27 @@
 
                 if (thumbnailUrl) {
                     block.texture = { type: 'image', value: null, state: 'generating' };
-                    this.generateAITexture(block, thumbnailUrl);
+                    this.textureGenerationQueue.push({ block, thumbnailUrl });
                 } else {
                     block.texture = { type: 'pattern', value: this.generateTexturePattern(project.title || 'untitled') };
                 }
                 
                 return block;
+            }
+
+            async processTextureGenerationQueue() {
+                if (this.textureGenerationQueue.length === 0) {
+                    return;
+                }
+
+                const { block, thumbnailUrl } = this.textureGenerationQueue.shift();
+
+                await this.generateAITexture(block, thumbnailUrl);
+
+                if (this.textureGenerationQueue.length > 0) {
+                    // A small delay between requests to not flood the server.
+                    setTimeout(() => this.processTextureGenerationQueue(), 500);
+                }
             }
 
             async generateAITexture(block, thumbnailUrl) {
