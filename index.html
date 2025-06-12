@@ -177,6 +177,9 @@
                 this.blockSize = 40;
                 this.grid = Array(this.gridHeight).fill().map(() => Array(this.gridWidth).fill(0));
                 
+                this.textureImageCache = {};
+                this.texturePatternCache = {};
+
                 this.currentBlock = null;
                 this.nextBlock = null;
                 this.score = 0;
@@ -273,7 +276,8 @@
                 if (projects.projects && projects.projects.data) {
                     projects.projects.data.forEach(item => {
                         const project = item.project;
-                        const block = this.createBlockFromProject(project, blockId++);
+                        const project_revision = item.project_revision;
+                        const block = this.createBlockFromProject(project, project_revision, blockId++);
                         this.metadataQueue.push(block);
                         this.addMetadataItem(`📁 Project: ${project.title || 'Untitled'}`, 'project');
                     });
@@ -313,9 +317,9 @@
                 document.getElementById('dataPoints').textContent = this.dataPoints;
             }
 
-            createBlockFromProject(project, id) {
+            createBlockFromProject(project, project_revision, id) {
                 const colors = ['#ff6b6b', '#4ecdc4', '#45b7d1', '#96ceb4', '#ffeaa7'];
-                return {
+                const block = {
                     id: id,
                     type: 'project',
                     color: colors[id % colors.length],
@@ -327,8 +331,58 @@
                         visibility: project.visibility,
                         created_at: project.created_at
                     },
-                    texture: this.generateTexturePattern(project.title || 'untitled')
+                    texture: null
                 };
+
+                const thumbnailUrl = project_revision?.current_screenshot_url;
+
+                if (thumbnailUrl) {
+                    block.texture = { type: 'image', value: null, state: 'generating' };
+                    this.generateAITexture(block, thumbnailUrl);
+                } else {
+                    block.texture = { type: 'pattern', value: this.generateTexturePattern(project.title || 'untitled') };
+                }
+                
+                return block;
+            }
+
+            async generateAITexture(block, thumbnailUrl) {
+                try {
+                    const analysisCompletion = await websim.chat.completions.create({
+                        messages: [{
+                            role: "user",
+                            content: [
+                                { type: "text", text: "Describe this image for an image generation prompt. Focus on the main subject, style, and colors. Be concise, like 'a cute pixel art cat, blue and purple'." },
+                                { type: "image_url", image_url: { url: thumbnailUrl } },
+                            ],
+                        }],
+                    });
+                    const description = analysisCompletion.content;
+
+                    const imageGenResult = await websim.imageGen({
+                        prompt: `a seamless, tileable, repeating texture based on: ${description}`,
+                        width: 128,
+                        height: 128,
+                    });
+
+                    block.texture.value = imageGenResult.url;
+                    block.texture.state = 'ready';
+                    this.preloadTextureImage(imageGenResult.url);
+
+                } catch (error) {
+                    console.error('AI Texture generation failed for block', block.id, error);
+                    block.texture.state = 'failed';
+                    block.texture.type = 'pattern';
+                    block.texture.value = 'crosses';
+                }
+            }
+
+            preloadTextureImage(url) {
+                if (!this.textureImageCache[url]) {
+                    const img = new Image();
+                    img.src = url;
+                    this.textureImageCache[url] = img;
+                }
             }
 
             createBlockFromUser(user, id, type) {
@@ -344,7 +398,7 @@
                         description: user.description,
                         created_at: user.created_at
                     },
-                    texture: this.generateTexturePattern(user.username || 'user')
+                    texture: { type: 'pattern', value: this.generateTexturePattern(user.username || 'user') }
                 };
             }
 
@@ -359,7 +413,7 @@
                         site_id: like.site_id,
                         created_at: like.created_at
                     },
-                    texture: this.generateTexturePattern('like')
+                    texture: { type: 'pattern', value: this.generateTexturePattern('like') }
                 };
             }
 
@@ -631,43 +685,20 @@
                 const pixelY = y * this.blockSize;
                 
                 // Draw base color
-                this.ctx.fillStyle = isCurrent ? blockData.color + '80' : blockData.color;
+                this.ctx.fillStyle = blockData.color;
+                if (isCurrent) {
+                    this.ctx.globalAlpha = 0.8;
+                }
                 this.ctx.fillRect(pixelX, pixelY, this.blockSize, this.blockSize);
-                
-                // Draw texture pattern
-                this.ctx.strokeStyle = '#fff';
-                this.ctx.lineWidth = 1;
-                
-                switch (blockData.texture) {
-                    case 'dots':
-                        this.ctx.fillStyle = '#fff';
-                        this.ctx.beginPath();
-                        this.ctx.arc(pixelX + this.blockSize/2, pixelY + this.blockSize/2, 3, 0, Math.PI * 2);
-                        this.ctx.fill();
-                        break;
-                    case 'stripes':
-                        for (let i = 0; i < 4; i++) {
-                            this.ctx.beginPath();
-                            this.ctx.moveTo(pixelX, pixelY + i * 10);
-                            this.ctx.lineTo(pixelX + this.blockSize, pixelY + i * 10);
-                            this.ctx.stroke();
-                        }
-                        break;
-                    case 'crosses':
-                        this.ctx.beginPath();
-                        this.ctx.moveTo(pixelX + this.blockSize/2, pixelY + 5);
-                        this.ctx.lineTo(pixelX + this.blockSize/2, pixelY + this.blockSize - 5);
-                        this.ctx.moveTo(pixelX + 5, pixelY + this.blockSize/2);
-                        this.ctx.lineTo(pixelX + this.blockSize - 5, pixelY + this.blockSize/2);
-                        this.ctx.stroke();
-                        break;
-                    case 'grid':
-                        this.ctx.strokeRect(pixelX + 5, pixelY + 5, this.blockSize - 10, this.blockSize - 10);
-                        break;
+                if (isCurrent) {
+                    this.ctx.globalAlpha = 1.0;
                 }
                 
+                // Draw texture
+                this.drawTexture(pixelX, pixelY, blockData.texture);
+                
                 // Draw border
-                this.ctx.strokeStyle = isCurrent ? '#fff' : '#ddd';
+                this.ctx.strokeStyle = isCurrent ? '#fff' : 'rgba(221, 221, 221, 0.5)';
                 this.ctx.lineWidth = 2;
                 this.ctx.strokeRect(pixelX, pixelY, this.blockSize, this.blockSize);
                 
@@ -675,6 +706,85 @@
                 this.ctx.fillStyle = '#fff';
                 this.ctx.font = '10px monospace';
                 this.ctx.fillText(blockData.type[0].toUpperCase(), pixelX + 2, pixelY + 12);
+            }
+
+            drawTexture(pixelX, pixelY, texture) {
+                if (!texture) return;
+
+                if (texture.type === 'image') {
+                    if (texture.state === 'ready' && texture.value) {
+                        const img = this.textureImageCache[texture.value];
+                        if (img && img.complete && img.naturalWidth > 0) {
+                            if (!this.texturePatternCache[texture.value]) {
+                                this.texturePatternCache[texture.value] = this.ctx.createPattern(img, 'repeat');
+                            }
+                            this.ctx.globalAlpha = 0.4;
+                            this.ctx.fillStyle = this.texturePatternCache[texture.value];
+                            this.ctx.fillRect(pixelX, pixelY, this.blockSize, this.blockSize);
+                            this.ctx.globalAlpha = 1.0;
+                        } else {
+                            this.drawLoadingTexture(pixelX, pixelY);
+                        }
+                    } else if (texture.state === 'generating') {
+                        this.drawLoadingTexture(pixelX, pixelY);
+                    } else { // failed
+                        this.drawPatternTexture('crosses', pixelX, pixelY);
+                    }
+                } else if (texture.type === 'pattern') {
+                    this.drawPatternTexture(texture.value, pixelX, pixelY);
+                }
+            }
+
+            drawLoadingTexture(pixelX, pixelY) {
+                this.ctx.save();
+                this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
+                this.ctx.lineWidth = 3;
+                this.ctx.translate(pixelX + this.blockSize / 2, pixelY + this.blockSize / 2);
+                this.ctx.rotate(Date.now() / 300 % (Math.PI * 2));
+                this.ctx.beginPath();
+                this.ctx.arc(0, 0, this.blockSize / 4, 0, Math.PI * 1.5);
+                this.ctx.stroke();
+                this.ctx.restore();
+            }
+
+            drawPatternTexture(patternType, pixelX, pixelY) {
+                this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+                this.ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+                this.ctx.lineWidth = 1;
+
+                switch (patternType) {
+                    case 'dots':
+                        this.ctx.beginPath();
+                        this.ctx.arc(pixelX + this.blockSize / 2, pixelY + this.blockSize / 2, 3, 0, Math.PI * 2);
+                        this.ctx.fill();
+                        break;
+                    case 'stripes':
+                        for (let i = 1; i < 4; i++) {
+                            this.ctx.beginPath();
+                            this.ctx.moveTo(pixelX, pixelY + i * (this.blockSize / 4));
+                            this.ctx.lineTo(pixelX + this.blockSize, pixelY + i * (this.blockSize / 4));
+                            this.ctx.stroke();
+                        }
+                        break;
+                    case 'crosses':
+                        this.ctx.beginPath();
+                        this.ctx.moveTo(pixelX + this.blockSize / 2, pixelY + 5);
+                        this.ctx.lineTo(pixelX + this.blockSize / 2, pixelY + this.blockSize - 5);
+                        this.ctx.moveTo(pixelX + 5, pixelY + this.blockSize / 2);
+                        this.ctx.lineTo(pixelX + this.blockSize - 5, pixelY + this.blockSize / 2);
+                        this.ctx.stroke();
+                        break;
+                    case 'grid':
+                        this.ctx.strokeRect(pixelX + 5, pixelY + 5, this.blockSize - 10, this.blockSize - 10);
+                        break;
+                    case 'waves': // Adding waves from original list
+                        this.ctx.beginPath();
+                        for (let i = 0; i < this.blockSize; i++) {
+                            this.ctx.lineTo(pixelX + i, pixelY + (this.blockSize / 2) + Math.sin(i * 0.5) * 5);
+                        }
+                        this.ctx.stroke();
+                        break;
+                }
             }
 
             gameLoop() {
@@ -703,4 +813,3 @@
 <script defer src="https://static.cloudflareinsights.com/beacon.min.js/v8c78df7c7c0f484497ecbca7046644da1771523124516" integrity="sha512-8DS7rgIrAmghBFwoOTujcf6D9rXvH8xm8JQ1Ja01h9QX8EzXldiszufYa4IFfKdLUKTTrnSFXLDkUEOTrZQ8Qg==" data-cf-beacon='{"version":"2024.11.0","token":"4c6229722a6346bc8eb5cb0e5eae5d41","server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
 </body>
 </html>
-
